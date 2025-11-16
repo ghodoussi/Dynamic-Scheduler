@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Weekly Schedule Optimizer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body{font-family:Inter, sans-serif;background:#f7f7f7;padding:20px;display:flex;justify-content:center;align-items:flex-start;min-height:100vh}
+    #app-container{max-width:1200px;width:100%;display:grid;gap:20px;grid-template-columns:1fr}
+    @media(min-width:1024px){#app-container{grid-template-columns:2fr 3fr}}
+    .card{background:#fff;padding:24px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.05);border:1px solid #e5e7eb}
+    .schedule-grid{display:grid;grid-template-columns:60px repeat(7,1fr);grid-auto-rows:minmax(20px,auto);border-left:1px solid #ddd;border-top:1px solid #ddd}
+    .grid-header,.grid-cell{padding:4px;border-right:1px solid #ddd;border-bottom:1px solid #ddd;text-align:center;font-size:.75rem;line-height:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    .time-label{grid-column:1/2;text-align:right;padding-right:8px;font-weight:600}
+    .fixed-task{background:#fca5a5;color:#7f1d1d}.flexible-task{background:#bfdbfe;color:#1e40af}.critical-task{background:#a7f3d0;color:#065f46}
+    .input-group{display:flex;flex-direction:column;gap:8px}@media(min-width:640px){.input-group{flex-direction:row}}
+    .type-btn.ring-4{box-shadow:0 0 0 4px rgba(99,102,241,0.5)}
+    .allowed-day{padding:6px 8px;border-radius:6px;border:1px solid #e5e7eb;background:#fff;cursor:pointer;font-size:.75rem}
+    .allowed-day.active{background:#4f46e5;color:#fff;border-color:#4f46e5}
+  </style>
+</head>
+<body>
+  <div id="app-container">
+    <div class="space-y-5">
+      <div id="input-card" class="card">
+        <h2 class="text-2xl font-bold text-gray-800 mb-6">Task Interview</h2>
+        <div id="interview-prompts">
+          <p id="current-prompt" class="text-lg mb-4 text-gray-700"></p>
+          <div id="user-input-area" class="space-y-4"></div>
+          <div id="message-box" class="mt-4 p-3 rounded-lg text-sm hidden"></div>
+        </div>
+
+        <div class="mt-8 pt-4 border-t border-gray-200">
+          <h3 class="text-xl font-semibold mb-2">Defined Tasks (<span id="task-count">0</span>)</h3>
+          <ul id="task-list" class="space-y-1 text-sm text-gray-600 max-h-40 overflow-y-auto"></ul>
+        </div>
+
+        <button id="new-task-btn" class="w-full mt-4 bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 shadow-md">+ Add New Task</button>
+      </div>
+
+      <div id="active-hours-card" class="card">
+        <h3 class="text-xl font-bold text-gray-800 mb-4">Daily Active Hours</h3>
+        <p class="text-sm text-gray-600 mb-4">Only time between these hours will be considered for flexible tasks (7 days/week).</p>
+        <div class="space-y-3 mb-4">
+          <div class="input-group items-center">
+            <label for="activeStartSelect" class="text-gray-700 w-16">Start:</label>
+            <select id="activeStartSelect" class="p-2 border border-gray-300 rounded-lg flex-1"></select>
+          </div>
+          <div class="input-group items-center">
+            <label for="activeEndSelect" class="text-gray-700 w-16">End:</label>
+            <select id="activeEndSelect" class="p-2 border border-gray-300 rounded-lg flex-1"></select>
+          </div>
+        </div>
+        <p id="active-hours-summary" class="text-sm text-green-700 font-medium"></p>
+      </div>
+
+      <button id="generate-schedule" class="w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 shadow-md disabled:bg-indigo-300" disabled>Generate Schedule</button>
+    </div>
+
+    <div id="schedule-card" class="card">
+      <h2 class="text-2xl font-bold text-gray-800 mb-4">Weekly Schedule</h2>
+      <p id="schedule-message" class="text-gray-500 mb-4">Define tasks to generate your optimal schedule.</p>
+      <div id="schedule-output" class="overflow-x-auto">
+        <div id="schedule-placeholder" class="h-96 w-full flex items-center justify-center bg-gray-50 rounded-lg border border-dashed border-gray-300">
+          <p class="text-gray-500 italic">Schedule will appear here after calculation.</p>
+        </div>
+      </div>
+
+      <div class="mt-4 flex gap-2">
+        <button id="export-ics" class="bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 transition disabled:opacity-50" disabled>Export to Google Calendar (.ics)</button>
+        <button id="export-fixed-ics" class="bg-green-200 text-green-800 py-2 px-4 rounded-lg hover:bg-green-300 transition" title="Export only fixed events">Export Fixed Events (.ics)</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ---- Constants & Globals ---- */
+const DAYS_OF_WEEK = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const MINUTES_IN_DAY = 24 * 60;
+const SLOTS_PER_DAY = 96;
+const SLOTS_PER_WEEK = 7 * SLOTS_PER_DAY;
+
+let tasks = [];
+let taskIdCounter = 1;
+let currentTask = {};
+let interviewStep = 0;
+let isEditing = false;
+let dailyActiveHours = { start: 540, end: 1020 }; // 9:00-17:00
+
+let lastServerSchedule = null;
+let lastWeekStartDate = null;
+
+/* prereq subflow helpers */
+let isCreatingPrereqForId = null;
+let currentTaskBeforePrereqCreation = null;
+
+/* DOM refs (populated DOMContentLoaded) */
+let currentPromptEl, userInputAreaEl, taskListEl, taskCountEl, generateBtn,
+    messageBoxEl, scheduleOutputEl, schedulePlaceholderEl, scheduleMessageEl,
+    activeStartSelectEl, activeEndSelectEl, activeHoursSummaryEl,
+    exportIcsBtn, exportFixedIcsBtn, newTaskBtn;
+
+/* ---- Utilities ---- */
+function showMessage(text, isError=false){
+  messageBoxEl.textContent = text;
+  messageBoxEl.className = 'mt-4 p-3 rounded-lg text-sm ' + (isError ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700');
+  messageBoxEl.classList.remove('hidden');
+}
+function clearMessage(){ messageBoxEl.classList.add('hidden'); }
+
+function pad2(n){ return (''+n).padStart(2,'0'); }
+
+function minutesToTimeDisplay(totalMinutes, includeDay=true){
+  const dayIndex = Math.floor(totalMinutes / MINUTES_IN_DAY);
+  const day = DAYS_OF_WEEK[dayIndex % 7];
+  const dayMinutes = totalMinutes % MINUTES_IN_DAY;
+  const hour = Math.floor(dayMinutes / 60);
+  const minute = dayMinutes % 60;
+  const time = pad2(hour) + ':' + pad2(minute);
+  return includeDay ? day + ', ' + time : time;
+}
+
+function generateTimeOptions(){
+  let opts = '';
+  for(let i=0;i<SLOTS_PER_DAY;i++){
+    const m = i * 15;
+    const h = Math.floor(m/60);
+    const mm = m%60;
+    const label = pad2(h) + ':' + pad2(mm);
+    opts += '<option value=\"' + m + '\">' + label + '</option>';
+  }
+  return opts;
+}
+
+/* ---- Back button helper ---- */
+function createBackButton(callback){
+  const backBtn = document.createElement('button');
+  backBtn.id = 'backBtn';
+  backBtn.className = 'w-full bg-gray-300 text-gray-800 py-3 rounded-lg hover:bg-gray-400 transition font-semibold text-lg';
+  backBtn.textContent = '← Back';
+  backBtn.onclick = () => { clearMessage(); callback(); };
+
+  const nextBtn = document.getElementById('nextBtn');
+  let container = userInputAreaEl.querySelector('.flex.space-x-2.mt-2');
+
+  if(!container){
+    container = document.createElement('div');
+    container.className = 'flex space-x-2 mt-2';
+    if(nextBtn){
+      nextBtn.parentElement.insertBefore(container, nextBtn);
+      container.appendChild(backBtn);
+      container.appendChild(nextBtn);
+    } else {
+      container.appendChild(backBtn);
+      userInputAreaEl.appendChild(container);
+    }
+  } else {
+    const existing = container.querySelector('#backBtn');
+    if(existing) existing.replaceWith(backBtn);
+    else container.insertBefore(backBtn, container.firstChild);
+  }
+
+  backBtn.classList.add('flex-1');
+  if(nextBtn) nextBtn.classList.add('flex-1');
+  const saveBtn = document.getElementById('saveTaskBtn');
+  if(saveBtn) saveBtn.classList.add('flex-1');
+}
+
+/* ---- Daily active hours (function fix) ---- */
+function updateDailyActiveHours(){
+  const start = parseInt(activeStartSelectEl.value);
+  const end = parseInt(activeEndSelectEl.value);
+  if(isNaN(start) || isNaN(end)){
+    return;
+  }
+  if(end <= start){
+    activeHoursSummaryEl.textContent = 'Invalid range: end time must be later than start.';
+    activeHoursSummaryEl.className = 'text-sm text-red-700 font-medium';
+    return;
+  }
+  dailyActiveHours.start = start;
+  dailyActiveHours.end = end;
+  activeHoursSummaryEl.textContent = 'Active window: ' + pad2(Math.floor(start/60)) + ':' + pad2(start%60) + ' – ' + pad2(Math.floor(end/60)) + ':' + pad2(end%60);
+  activeHoursSummaryEl.className = 'text-sm text-green-700 font-medium';
+  if(tasks.length > 0) generateBtn.disabled = false;
+  if(scheduleOutputEl.querySelector('.schedule-grid')) generateWeeklySchedule();
+}
+
+/* ---- Interview flow start ---- */
+function startInterview(){
+  clearMessage();
+  interviewStep = 0;
+  currentTask = { id: 'T' + taskIdCounter++, prerequisites: [], remainingDuration: 60, allowedDays: [0,1,2,3,4,5,6] };
+  isCreatingPrereqForId = null;
+  currentTaskBeforePrereqCreation = null;
+  promptTaskName();
+}
+
+/* ---- Edit / Delete ---- */
+window.editTask = function(taskId){
+  const t = tasks.find(x=>x.id===taskId);
+  if(!t) return showMessage('Task not found.', true);
+  isEditing = true;
+  currentTask = JSON.parse(JSON.stringify(t));
+  currentPromptEl.innerHTML = 'You are EDITING: <strong>' + currentTask.name + '</strong>. What would you like to change?';
+  if(currentTask.type === 'FIXED') promptTimeWindow(true); else promptDuration(true);
+  document.getElementById('input-card').scrollIntoView({ behavior: 'smooth' });
+};
+
+window.deleteTask = function(taskId){
+  const idx = tasks.findIndex(t=>t.id===taskId);
+  if(idx === -1) return showMessage('Task not found.', true);
+  const name = tasks[idx].name;
+  const modal = document.createElement('div');
+  modal.className = 'fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50';
+  modal.innerHTML = '<div class=\"bg-white p-6 rounded-lg shadow-xl max-w-sm w-full\">' +
+    '<h3 class=\"text-lg font-bold mb-4 text-gray-900\">Confirm Deletion</h3>' +
+    '<p class=\"text-gray-700 mb-6\">Delete task: <strong>' + name + '</strong>?</p>' +
+    '<div class=\"flex justify-end space-x-3\">' +
+    '<button id=\"cancelDelete\" class=\"px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300\">Cancel</button>' +
+    '<button id=\"confirmDelete\" class=\"px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600\">Delete</button>' +
+    '</div></div>';
+  document.body.appendChild(modal);
+  document.getElementById('cancelDelete').onclick = ()=> document.body.removeChild(modal);
+  document.getElementById('confirmDelete').onclick = ()=>{
+    document.body.removeChild(modal);
+    tasks.splice(idx,1);
+    tasks.forEach(t=> t.prerequisites = t.prerequisites.filter(p=>p!==taskId));
+    showMessage('Task \"' + name + '\" deleted.');
+    updateTaskList();
+    if(tasks.length>0) generateWeeklySchedule(); else {
+      scheduleOutputEl.innerHTML = ''; schedulePlaceholderEl.classList.remove('hidden');
+      scheduleMessageEl.textContent = 'Define tasks to generate your optimal schedule.'; generateBtn.disabled = true;
+    }
+  };
+};
+
+/* ---- Steps: name, type, fixed/flexible, duration, days, allowed window, prereqs ---- */
+
+function promptTaskName(){
+  interviewStep = 1;
+  currentPromptEl.innerHTML = 'What is the <strong>name</strong> of the task or event?';
+  userInputAreaEl.innerHTML = '<input id=\"taskNameInput\" type=\"text\" placeholder=\"e.g., Work Shift, Study Session\" class=\"w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500\">' +
+    '<button id=\"nextBtn\" class=\"w-full bg-indigo-500 text-white py-3 rounded-lg hover:bg-indigo-600 transition mt-2 font-semibold text-lg\">Next</button>';
+  if(currentTask.name) document.getElementById('taskNameInput').value = currentTask.name;
+  document.getElementById('nextBtn').onclick = ()=>{
+    const name = document.getElementById('taskNameInput').value.trim();
+    if(!name) return showMessage('Please enter a task name.', true);
+    currentTask.name = name;
+    promptTaskType();
+  };
+}
+
+function promptTaskType(){
+  interviewStep = 2;
+  currentPromptEl.innerHTML = 'Is \"' + currentTask.name + '\" a <strong>FIXED</strong> event or a <strong>FLEXIBLE</strong> task?';
+  userInputAreaEl.innerHTML = '<div class=\"flex space-x-4 mb-4\">' +
+    '<button data-type=\"FIXED\" class=\"type-btn flex-1 bg-red-400 text-white py-3 rounded-lg hover:bg-red-500 transition font-semibold text-lg\">FIXED Event</button>' +
+    '<button data-type=\"FLEXIBLE\" class=\"type-btn flex-1 bg-blue-400 text-white py-3 rounded-lg hover:bg-blue-500 transition font-semibold text-lg\">FLEXIBLE Task</button>' +
+    '</div><div id=\"nav-container\" class=\"flex space-x-2 mt-2\"></div>';
+  const nav = document.getElementById('nav-container');
+  const nextBtn = document.createElement('button');
+  nextBtn.id = 'nextBtn';
+  nextBtn.className = 'flex-1 bg-indigo-500 text-white py-3 rounded-lg transition disabled:bg-indigo-300 font-semibold text-lg';
+  nextBtn.textContent = 'Next Step';
+  nextBtn.disabled = true;
+  nav.appendChild(nextBtn);
+
+  if(currentTask.type){
+    const existing = userInputAreaEl.querySelector('.type-btn[data-type=\"' + currentTask.type + '\"]');
+    if(existing) { existing.classList.add('ring-4','ring-offset-2','ring-indigo-400'); nextBtn.disabled=false; }
+  }
+
+  Array.from(userInputAreaEl.querySelectorAll('.type-btn')).forEach(btn=>{
+    btn.onclick = (e)=>{
+      Array.from(userInputAreaEl.querySelectorAll('.type-btn')).forEach(b=> b.classList.remove('ring-4','ring-offset-2','ring-indigo-400'));
+      currentTask.type = e.currentTarget.getAttribute('data-type');
+      e.currentTarget.classList.add('ring-4','ring-offset-2','ring-indigo-400');
+      nextBtn.disabled = false;
+    };
+  });
+
+  nextBtn.onclick = ()=>{
+    if(currentTask.type==='FIXED') promptTimeWindow(); else promptDuration();
+  };
+
+  createBackButton(promptTaskName);
+}
+
+/* Fixed: single-day only (F2) */
+function promptTimeWindow(editMode=false){
+  interviewStep = 3;
+  currentPromptEl.innerHTML = 'When does \"' + currentTask.name + '\" occur? (Fixed events are single-day only)';
+  const dayOptions = DAYS_OF_WEEK.map((d,i)=> '<option value=\"' + i + '\">' + d + '</option>').join('');
+  const existingDay = (typeof currentTask.dayIndex === 'number') ? currentTask.dayIndex : 0;
+  const existingStart = (currentTask.timeWindow?.startMinutes ?? dailyActiveHours.start) % MINUTES_IN_DAY;
+  const existingEnd = (currentTask.timeWindow?.endMinutes ?? dailyActiveHours.end) % MINUTES_IN_DAY;
+
+  userInputAreaEl.innerHTML = '<div class=\"space-y-3\">' +
+    '<div class=\"flex flex-col sm:flex-row sm:items-center gap-2\"><label class=\"w-24 text-gray-700 font-medium\">Day:</label>' +
+    '<select id=\"fixedDay\" class=\"p-2 border border-gray-300 rounded-lg flex-1\">' + dayOptions + '</select></div>' +
+    '<div class=\"flex flex-col sm:flex-row sm:items-center gap-2\"><label class=\"w-24 text-gray-700 font-medium\">Start:</label>' +
+    '<select id=\"fixedStart\" class=\"p-2 border border-gray-300 rounded-lg flex-1\">' + generateTimeOptions() + '</select></div>' +
+    '<div class=\"flex flex-col sm:flex-row sm:items-center gap-2\"><label class=\"w-24 text-gray-700 font-medium\">End:</label>' +
+    '<select id=\"fixedEnd\" class=\"p-2 border border-gray-300 rounded-lg flex-1\">' + generateTimeOptions() + '</select></div>' +
+    '<button id=\"saveTaskBtn\" class=\"w-full bg-indigo-500 text-white py-3 rounded-lg hover:bg-indigo-600 transition font-semibold text-lg\">' + (editMode ? 'Save Changes' : 'Add Task') + '</button>' +
+    '</div>';
+
+  document.getElementById('fixedDay').value = existingDay;
+  document.getElementById('fixedStart').value = existingStart;
+  document.getElementById('fixedEnd').value = existingEnd;
+
+  document.getElementById('saveTaskBtn').onclick = ()=>{
+    const day = parseInt(document.getElementById('fixedDay').value);
+    const start = parseInt(document.getElementById('fixedStart').value);
+    const end = parseInt(document.getElementById('fixedEnd').value);
+    if(end <= start) return showMessage('End time must be after start time.', true);
+    currentTask.dayIndex = day;
+    currentTask.timeWindow = { startMinutes: day * MINUTES_IN_DAY + start, endMinutes: day * MINUTES_IN_DAY + end };
+    currentTask.remainingDuration = currentTask.timeWindow.endMinutes - currentTask.timeWindow.startMinutes;
+    finishTask(editMode);
+  };
+
+  createBackButton(promptTaskType);
+}
+
+function promptDuration(editMode=false){
+  interviewStep = 3;
+  currentPromptEl.innerHTML = 'How long does \"' + currentTask.name + '\" take? (Enter minutes)';
+  userInputAreaEl.innerHTML = '<input id=\"durationInput\" type=\"number\" min=\"15\" step=\"15\" placeholder=\"Duration in minutes (e.g., 60)\" class=\"w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500\">' +
+    '<button id=\"nextBtn\" class=\"w-full bg-indigo-500 text-white py-3 rounded-lg hover:bg-indigo-600 transition mt-2 font-semibold text-lg\">Next</button>';
+  if(currentTask.remainingDuration) document.getElementById('durationInput').value = currentTask.remainingDuration;
+  document.getElementById('nextBtn').onclick = ()=>{
+    const val = parseInt(document.getElementById('durationInput').value);
+    if(!val || val < 15) return showMessage('Duration must be at least 15 minutes.', true);
+    currentTask.remainingDuration = val;
+    promptAllowedDays(editMode);
+  };
+  createBackButton(promptTaskType);
+}
+
+function promptAllowedDays(editMode=false){
+  interviewStep = 4;
+  currentPromptEl.innerHTML = 'Which days can \"' + currentTask.name + '\" be scheduled on? (Flexible tasks can select multiple days)';
+  if(!currentTask.allowedDays) currentTask.allowedDays = [0,1,2,3,4,5,6];
+
+  const dayButtons = DAYS_OF_WEEK.map((d,i)=> '<button data-day=\"' + i + '\" class=\"allowed-day ' + (currentTask.allowedDays.includes(i) ? 'active' : '') + '\">' + d + '</button>').join('');
+  userInputAreaEl.innerHTML = '<div class=\"flex flex-wrap gap-2 mb-4\">' + dayButtons + '</div>' +
+    '<button id=\"nextBtn\" class=\"w-full bg-indigo-500 text-white py-3 rounded-lg hover:bg-indigo-600 transition font-semibold text-lg\">Next</button>';
+
+  Array.from(userInputAreaEl.querySelectorAll('.allowed-day')).forEach(btn=>{
+    btn.onclick = ()=> { btn.classList.toggle('active'); };
+  });
+
+  document.getElementById('nextBtn').onclick = ()=>{
+    const chosen = Array.from(userInputAreaEl.querySelectorAll('.allowed-day.active')).map(b=>parseInt(b.dataset.day));
+    if(chosen.length===0) return showMessage('Select at least one day.', true);
+    currentTask.allowedDays = chosen;
+    promptAllowedTimeWindow(editMode);
+  };
+
+  createBackButton(promptDuration);
+}
+
+function promptAllowedTimeWindow(editMode=false){
+  interviewStep = 5;
+  currentPromptEl.innerHTML = 'What daily time window can \"' + currentTask.name + '\" be done in?';
+  const start = currentTask.allowedTimeWindow?.start ?? dailyActiveHours.start;
+  const end = currentTask.allowedTimeWindow?.end ?? dailyActiveHours.end;
+  userInputAreaEl.innerHTML = '<div class=\"space-y-3\">' +
+    '<div class=\"flex flex-col sm:flex-row sm:items-center gap-2\"><label class=\"w-16\">Start:</label><select id=\"allowedStart\" class=\"p-2 border border-gray-300 rounded-lg flex-1\">' + generateTimeOptions() + '</select></div>' +
+    '<div class=\"flex flex-col sm:flex-row sm:items-center gap-2\"><label class=\"w-16\">End:</label><select id=\"allowedEnd\" class=\"p-2 border border-gray-300 rounded-lg flex-1\">' + generateTimeOptions() + '</select></div>' +
+    '<button id=\"nextBtn\" class=\"w-full bg-indigo-500 text-white py-3 rounded-lg hover:bg-indigo-600 transition font-semibold text-lg\">Next</button>' +
+    '</div>';
+  document.getElementById('allowedStart').value = start;
+  document.getElementById('allowedEnd').value = end;
+  document.getElementById('nextBtn').onclick = ()=>{
+    const s = parseInt(document.getElementById('allowedStart').value);
+    const e = parseInt(document.getElementById('allowedEnd').value);
+    if(e <= s) return showMessage('End must be after start.', true);
+    currentTask.allowedTimeWindow = { start: s, end: e };
+    promptPrerequisites(editMode);
+  };
+  createBackButton(promptAllowedDays);
+}
+
+/* ---- Prereq step with create-subtask support (Option A) ---- */
+function promptPrerequisites(editMode=false){
+  interviewStep = 6;
+  const available = tasks.filter(t => t.id !== currentTask.id);
+
+  currentPromptEl.innerHTML = 'Does \"' + currentTask.name + '\" depend on any other tasks? <br><span class=\"text-sm text-gray-600\">You can select existing tasks or create a new one.</span>';
+
+  // build UI: existing tasks + create-new button
+  let itemsHtml = '';
+  if(available.length === 0){
+    itemsHtml = '<p class=\"text-sm text-gray-600 italic\">No other tasks defined yet.</p>';
+  } else {
+    itemsHtml = available.map(t => '<label class=\"flex items-center space-x-2\"><input type=\"checkbox\" data-prereq=\"' + t.id + '\"><span>' + t.name + '</span></label>').join('');
+  }
+
+  userInputAreaEl.innerHTML = '<div class=\"space-y-3\">' +
+    '<div class=\"grid gap-2\">' + itemsHtml + '</div>' +
+    '<div class=\"flex space-x-2 mt-2\">' +
+      '<button id=\"createPrereqBtn\" class=\"flex-1 bg-gray-200 text-gray-800 py-3 rounded-lg hover:bg-gray-300\">+ Create New Prereq</button>' +
+      '<button id=\"nextBtn\" class=\"flex-1 bg-indigo-500 text-white py-3 rounded-lg hover:bg-indigo-600\">' + (editMode ? 'Save Changes' : 'Add Task') + '</button>' +
+    '</div>' +
+    '</div>';
+
+  // restore checked if editing
+  if(currentTask.prerequisites?.length > 0){
+    currentTask.prerequisites.forEach(id => {
+      const cb = userInputAreaEl.querySelector('input[data-prereq=\"' + id + '\"]');
+      if(cb) cb.checked = true;
+    });
+  }
+
+  document.getElementById('createPrereqBtn').onclick = ()=>{
+    // save parent task and start a new interview for the prereq
+    isCreatingPrereqForId = currentTask.id;
+    currentTaskBeforePrereqCreation = JSON.parse(JSON.stringify(currentTask));
+    // start a fresh interview for the new prereq
+    currentTask = { id: 'T' + taskIdCounter++, prerequisites: [], remainingDuration: 60, allowedDays: [0,1,2,3,4,5,6] };
+    isEditing = false;
+    promptTaskName();
+  };
+
+  document.getElementById('nextBtn').onclick = ()=>{
+    const selected = Array.from(userInputAreaEl.querySelectorAll('input[data-prereq]:checked')).map(cb => cb.dataset.prereq);
+    currentTask.prerequisites = selected;
+    finishTask(editMode);
+  };
+
+  createBackButton(promptAllowedTimeWindow);
+}
+
+/* When a prereq is created via sub-interview, finishTask must attach it to parent */
+function finishTask(editMode=false){
+  clearMessage();
+
+  // if we returned as a prereq creation flow, attach new task to parent and restore parent
+  if(isCreatingPrereqForId){
+    // push the newly created prereq
+    tasks.push(JSON.parse(JSON.stringify(currentTask)));
+
+    // find parent and attach prereq id
+    const parentIdx = tasks.findIndex(t => t.id === isCreatingPrereqForId);
+    // if parent hasn't been saved yet (it was only in currentTaskBeforePrereqCreation), add/merge
+    if(parentIdx === -1 && currentTaskBeforePrereqCreation){
+      // restore parent to tasks and add prereq
+      const parentObj = currentTaskBeforePrereqCreation;
+      if(!parentObj.prerequisites) parentObj.prerequisites = [];
+      parentObj.prerequisites.push(currentTask.id);
+      tasks.push(parentObj);
+      // clear state, and set currentTask to parent to continue editing if needed
+      isCreatingPrereqForId = null;
+      currentTask = parentObj;
+      currentTaskBeforePrereqCreation = null;
+      showMessage('Prerequisite created and attached to parent task.');
+      updateTaskList();
+      generateBtn.disabled = tasks.length === 0;
+      return;
+    }
+
+    if(parentIdx !== -1){
+      const parent = tasks[parentIdx];
+      if(!parent.prerequisites) parent.prerequisites = [];
+      parent.prerequisites.push(currentTask.id);
+      showMessage('Prerequisite created and attached to "' + parent.name + '".');
+      isCreatingPrereqForId = null;
+      currentTask = {};
+      currentTaskBeforePrereqCreation = null;
+      updateTaskList();
+      generateBtn.disabled = tasks.length === 0;
+      return;
+    }
+
+    // fallback: clear state
+    isCreatingPrereqForId = null;
+    currentTaskBeforePrereqCreation = null;
+  }
+
+  // Normal save/update
+  if(isEditing){
+    const idx = tasks.findIndex(t => t.id === currentTask.id);
+    if(idx >= 0) tasks[idx] = JSON.parse(JSON.stringify(currentTask));
+    showMessage('Updated \"' + currentTask.name + '\".');
+  } else {
+    tasks.push(JSON.parse(JSON.stringify(currentTask)));
+    showMessage('Task \"' + currentTask.name + '\" added.');
+  }
+
+  isEditing = false;
+  currentTask = {};
+  updateTaskList();
+  generateBtn.disabled = tasks.length === 0;
+  userInputAreaEl.innerHTML = '';
+  currentPromptEl.innerHTML = 'Ready for your next task!';
+}
+
+/* ---- Task list render ---- */
+function updateTaskList(){
+  taskListEl.innerHTML = '';
+  taskCountEl.textContent = tasks.length;
+  tasks.forEach(t=>{
+    const li = document.createElement('li');
+    li.className = 'flex justify-between items-center bg-gray-100 px-3 py-1 rounded';
+    const text = document.createElement('span'); text.textContent = t.name;
+    const controls = document.createElement('div'); controls.className = 'flex space-x-3';
+    const editBtn = document.createElement('button'); editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm'; editBtn.textContent = 'Edit'; editBtn.onclick = ()=> editTask(t.id);
+    const delBtn = document.createElement('button'); delBtn.className = 'text-red-600 hover:text-red-800 text-sm'; delBtn.textContent = 'Delete'; delBtn.onclick = ()=> deleteTask(t.id);
+    controls.appendChild(editBtn); controls.appendChild(delBtn);
+    li.appendChild(text); li.appendChild(controls);
+    taskListEl.appendChild(li);
+  });
+}
+
+/* ---- Normalize tasks to server shape and POST ---- */
+async function generateWeeklySchedule(){
+  clearMessage();
+  scheduleMessageEl.textContent = 'Calculating optimal schedule…';
+
+  const normalizedTasks = tasks.map(t=>{
+    const nt = { id: t.id, type: t.type, prerequisites: t.prerequisites || [] };
+
+    if(t.type === 'FIXED'){
+      // F2: single-day fixed tasks
+      nt.timeWindow = { startMinutes: t.timeWindow.startMinutes, endMinutes: t.timeWindow.endMinutes };
+      nt.duration = (t.timeWindow.endMinutes - t.timeWindow.startMinutes);
+      nt.days = [ t.dayIndex ];
+      nt.allowedWindow = { startMinutes: 0, endMinutes: 24 * 60 };
+    } else {
+      nt.duration = t.remainingDuration || t.duration || 60;
+      nt.days = t.allowedDays || t.days || [0,1,2,3,4,5,6];
+      nt.allowedWindow = { startMinutes: (t.allowedTimeWindow?.start ?? t.allowedWindow?.startMinutes ?? dailyActiveHours.start), endMinutes: (t.allowedTimeWindow?.end ?? t.allowedWindow?.endMinutes ?? dailyActiveHours.end) };
+    }
+
+    return nt;
+  });
+
+  let resp;
+  try{
+    resp = await fetch('/api/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tasks: normalizedTasks, dailyActiveHours })
+    });
+  } catch (e) {
+    showMessage('Error contacting server: ' + e.message, true);
+    return;
+  }
+
+  const data = await resp.json();
+  if(!data.success){
+    showMessage(data.error || 'Unable to compute schedule.', true);
+    return;
+  }
+
+  lastServerSchedule = data.schedule;
+  lastWeekStartDate = computeStartOfCurrentWeek();
+  renderScheduleGrid(data.schedule);
+
+  if(data.unscheduled && data.unscheduled.length > 0){
+    scheduleMessageEl.textContent = 'Some tasks could not be scheduled.';
+    showUnscheduledList(data.unscheduled);
+  } else {
+    scheduleMessageEl.textContent = 'All tasks scheduled successfully!';
+  }
+  exportIcsBtn.disabled = false;
+}
+
+/* ---- Render grid ---- */
+function renderScheduleGrid(scheduleArr){
+  scheduleOutputEl.innerHTML = '';
+  const grid = document.createElement('div'); grid.className = 'schedule-grid';
+
+  // headers
+  grid.appendChild(Object.assign(document.createElement('div'), { className: 'grid-header', textContent: '' }));
+  DAYS_OF_WEEK.forEach(d => {
+    const h = document.createElement('div'); h.className = 'grid-header'; h.textContent = d; grid.appendChild(h);
+  });
+
+  for(let slot = 0; slot < SLOTS_PER_DAY; slot++){
+    const minutes = slot * 15;
+    const label = pad2(Math.floor(minutes/60)) + ':' + pad2(minutes % 60);
+    const timeLabel = document.createElement('div'); timeLabel.className = 'time-label grid-header'; timeLabel.textContent = label;
+    grid.appendChild(timeLabel);
+
+    for(let d=0; d<7; d++){
+      const absIndex = d * SLOTS_PER_DAY + slot;
+      const tid = scheduleArr[absIndex];
+      const cell = document.createElement('div'); cell.className = 'grid-cell';
+      if(tid){
+        const task = tasks.find(t=>t.id===tid);
+        if(task){
+          cell.classList.add(task.type === 'FIXED' ? 'fixed-task' : 'flexible-task');
+          cell.textContent = task.name;
+        } else {
+          cell.textContent = tid;
+        }
+      } else {
+        // mark inactive hours visually
+        const minutesInDay = minutes;
+        if(minutesInDay < dailyActiveHours.start || minutesInDay >= dailyActiveHours.end){
+          cell.classList.add('bg-gray-100');
+        }
+      }
+      grid.appendChild(cell);
+    }
+  }
+
+  scheduleOutputEl.appendChild(grid);
+}
+
+/* ---- Unscheduled list ---- */
+function showUnscheduledList(list){
+  const cont = document.createElement('div'); cont.className = 'mt-4 p-3 bg-yellow-100 rounded-lg text-sm text-yellow-800';
+  cont.innerHTML = '<strong>Unscheduled Items:</strong><br>';
+  list.forEach(u => cont.innerHTML += '• ' + (u.taskId || u.instanceId) + ' — ' + (u.reason || '') + '<br>');
+  scheduleOutputEl.appendChild(cont);
+}
+
+/* ---- Week start (Sunday) ---- */
+function computeStartOfCurrentWeek(){
+  const now = new Date();
+  const day = now.getDay(); // Sunday=0
+  const diff = now.getDate() - day;
+  const start = new Date(now);
+  start.setDate(diff);
+  start.setHours(0,0,0,0);
+  return start;
+}
+
+/* ---- ICS helpers ---- */
+function formatICSDateLocal(dt){
+  const yyyy = dt.getFullYear();
+  const mm = String(dt.getMonth()+1).padStart(2,'0');
+  const dd = String(dt.getDate()).padStart(2,'0');
+  const hh = String(dt.getHours()).padStart(2,'0');
+  const mi = String(dt.getMinutes()).padStart(2,'0');
+  const ss = String(dt.getSeconds()).padStart(2,'0');
+  return '' + yyyy + mm + dd + 'T' + hh + mi + ss;
+}
+
+function buildEventsFromSchedule(schedule){
+  if(!schedule) return [];
+  const events = [];
+  let i = 0;
+  while(i < schedule.length){
+    const tid = schedule[i];
+    if(!tid){ i++; continue; }
+    let j = i + 1;
+    while(j < schedule.length && schedule[j] === tid) j++;
+    const startDate = new Date(lastWeekStartDate.getTime() + i * 15 * 60000);
+    const endDate = new Date(lastWeekStartDate.getTime() + j * 15 * 60000);
+    const task = tasks.find(t=>t.id===tid);
+    events.push({ title: task?task.name:tid, startDate, endDate, uid: tid + '-' + i + '-' + j });
+    i = j;
+  }
+  return events;
+}
+
+function downloadICSFile(events, filename){
+  const lines = ['BEGIN:VCALENDAR','VERSION:2.0','CALSCALE:GREGORIAN','PRODID:-//AI Scheduler//EN','METHOD:PUBLISH'];
+  events.forEach(ev=>{
+    lines.push('BEGIN:VEVENT');
+    lines.push('UID:' + ev.uid);
+    lines.push('SUMMARY:' + ev.title);
+    lines.push('DTSTART;TZID=America/Chicago:' + formatICSDateLocal(ev.startDate));
+    lines.push('DTEND;TZID=America/Chicago:' + formatICSDateLocal(ev.endDate));
+    lines.push('END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  const blob = new Blob([lines.join('\\r\\n')], { type: 'text/calendar' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
+}
+
+function handleExportAll(){ if(!lastServerSchedule) return showMessage('No schedule available to export.', true); const events = buildEventsFromSchedule(lastServerSchedule); if(events.length===0) return showMessage('No events to export.', true); downloadICSFile(events, 'weekly-schedule.ics'); }
+function handleExportFixedOnly(){ if(!lastWeekStartDate) lastWeekStartDate = computeStartOfCurrentWeek(); const events = []; tasks.forEach(t => { if(t.type === 'FIXED' && t.timeWindow){ const startDate = new Date(lastWeekStartDate.getTime() + t.timeWindow.startMinutes * 60000); const endDate = new Date(lastWeekStartDate.getTime() + t.timeWindow.endMinutes * 60000); events.push({ title: t.name, startDate, endDate, uid: t.id + '-fixed' }); } }); if(events.length===0) return showMessage('No fixed events to export.', true); downloadICSFile(events, 'fixed-events.ics'); }
+
+/* ---- Init ---- */
+document.addEventListener('DOMContentLoaded', ()=>{
+  currentPromptEl = document.getElementById('current-prompt');
+  userInputAreaEl = document.getElementById('user-input-area');
+  taskListEl = document.getElementById('task-list');
+  taskCountEl = document.getElementById('task-count');
+  generateBtn = document.getElementById('generate-schedule');
+  messageBoxEl = document.getElementById('message-box');
+  scheduleOutputEl = document.getElementById('schedule-output');
+  schedulePlaceholderEl = document.getElementById('schedule-placeholder');
+  scheduleMessageEl = document.getElementById('schedule-message');
+  activeStartSelectEl = document.getElementById('activeStartSelect');
+  activeEndSelectEl = document.getElementById('activeEndSelect');
+  activeHoursSummaryEl = document.getElementById('active-hours-summary');
+  exportIcsBtn = document.getElementById('export-ics');
+  exportFixedIcsBtn = document.getElementById('export-fixed-ics');
+  newTaskBtn = document.getElementById('new-task-btn');
+
+  const opts = generateTimeOptions();
+  activeStartSelectEl.innerHTML = opts;
+  activeEndSelectEl.innerHTML = opts;
+  activeStartSelectEl.value = dailyActiveHours.start;
+  activeEndSelectEl.value = dailyActiveHours.end;
+  updateDailyActiveHours();
+  activeStartSelectEl.addEventListener('change', updateDailyActiveHours);
+  activeEndSelectEl.addEventListener('change', updateDailyActiveHours);
+
+  generateBtn.onclick = generateWeeklySchedule;
+  exportIcsBtn.onclick = handleExportAll;
+  exportFixedIcsBtn.onclick = handleExportFixedOnly;
+
+  newTaskBtn.onclick = ()=>{
+    isEditing = false; currentTask = {}; interviewStep = 0; startInterview();
+    document.getElementById('input-card').scrollIntoView({ behavior: 'smooth' });
+  };
+
+  startInterview();
+});
+</script>
+</body>
+</html>
